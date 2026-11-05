@@ -1,0 +1,83 @@
+import { test, expect } from '@playwright/test';
+
+test('physical pick-and-place, deterministic reset, stop and failure recovery', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.waitForFunction(() => window.__simulation?.getState().physicsSteps > 10);
+  await page.screenshot({ path: 'artifacts/studio-desktop.png', fullPage: true });
+  await page.evaluate(() => window.__simulation.setBlockCount(1));
+  await page.waitForTimeout(500);
+  const initial = await page.evaluate(() => window.__simulation.getState());
+  expect(initial.phase).toBe('ready');
+  expect(initial.collisions).toBeGreaterThan(0);
+  const input = page.locator('textarea, input[type="text"]').first();
+  await input.fill('Place the orange block on the platform');
+  await page.getByRole('button', { name: /run command/i }).click();
+  await page.waitForFunction(() => window.__simulation.getState().attached, { timeout: 20000 });
+  const carried = await page.evaluate(() => window.__simulation.getState());
+  expect(carried.phase).toBe('running');
+  await page.waitForFunction(() => window.__simulation.getState().phase === 'success', { timeout: 30000 });
+  const delivered = await page.evaluate(() => window.__simulation.getState());
+  expect(delivered.released).toBe(true);
+  expect(delivered.gripped).toBe(false);
+  expect(delivered.collisions).toBeGreaterThan(initial.collisions);
+  expect(delivered.block.x).toBeCloseTo(1.45, 1);
+  expect(delivered.block.z).toBeCloseTo(-0.78, 1);
+  expect(delivered.block.y).toBeGreaterThan(0.55);
+  expect(delivered.block.y).toBeLessThan(0.72);
+  await page.screenshot({ path: 'artifacts/studio-success.png', fullPage: true });
+  await page.getByRole('button', { name: /reset/i }).first().click();
+  await page.waitForTimeout(500);
+  const reset = await page.evaluate(() => window.__simulation.getState());
+  expect(reset.phase).toBe('ready');
+  expect(reset.block.x).toBeCloseTo(initial.block.x, 3);
+  expect(reset.block.z).toBeCloseTo(initial.block.z, 3);
+  expect(reset.block.y).toBeCloseTo(initial.block.y, 2);
+  await input.fill('__test_failure__');
+  const before = await page.evaluate(() => window.__simulation.getState().physicsSteps);
+  await page.getByRole('button', { name: /run command/i }).click();
+  await expect(page.getByText(/simulated inference outage/i)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => window.__simulation.getState().physicsSteps)).toBeGreaterThan(before);
+  expect(await page.evaluate(() => window.__simulation.getState().phase)).toBe('ready');
+  await page.screenshot({ path: 'artifacts/studio-failure.png', fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test('mobile scene fits viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.waitForFunction(() => window.__simulation?.getState().physicsSteps > 5);
+  await expect(page.getByRole('button', { name: /run command/i })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: 'artifacts/studio-mobile.png', fullPage: true });
+});
+
+test('stop releases grasp, local fallback recovers, reset ignores delayed inference', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.__simulation?.getState().physicsSteps > 5);
+  await page.locator('#command').fill('__test_failure__');
+  await page.locator('#run').click();
+  await expect(page.locator('#fallback')).toBeVisible();
+  await page.locator('#fallback').click();
+  await page.waitForFunction(() => window.__simulation.getState().attached);
+  await page.locator('#stop').click();
+  const stopped = await page.evaluate(() => window.__simulation.getState());
+  expect(stopped.phase).toBe('stopped');
+  expect(stopped.gripped).toBe(false);
+  await page.locator('#reset').click();
+  await page.route('**/api/plan', async route => {
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    await route.fulfill({ json: { actions: [{ type: 'deliver' }], source: 'cerebras', latencyMs: 1200, message: 'Plan accepted' } });
+  });
+  await page.locator('#command').fill('Place the block on the platform');
+  const before = await page.evaluate(() => window.__simulation.getState().physicsSteps);
+  await page.locator('#run').click();
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => window.__simulation.getState().physicsSteps)).toBeGreaterThan(before);
+  await page.locator('#reset').click();
+  await page.waitForTimeout(1500);
+  expect(await page.evaluate(() => window.__simulation.getState().phase)).toBe('ready');
+  await expect(page.locator('#run')).toBeEnabled();
+});
