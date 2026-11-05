@@ -14,12 +14,12 @@ document.querySelector('#app').innerHTML=`
 <p id="hanoi-compare-summary" class="hanoi-comparison-summary" aria-live="polite">Preparing the two robot arms…</p>
 <div class="comparison-grid">${modes.map(mode=>`<section class="provider-pane" aria-label="${mode.label} Hanoi simulation"><header><div><h2>GPT-5.6 Sol · ${mode.label}</h2><p>OpenAI API · ${mode.tier} tier requested</p></div><span id="hc-badge-${mode.id}" class="provider-badge">Checking</span></header><p class="hc-tier" id="hc-tier-${mode.id}">${mode.id==='ultrafast'?'Cerebras-powered via OpenAI. Ultrafast account access required.':'Same puzzle, prompt, reasoning setting, and output limit.'}</p><div class="compare-scene" id="hc-scene-${mode.id}"></div><div class="pane-status"><strong id="hc-status-${mode.id}">Loading physics</strong><span id="hc-fps-${mode.id}">— fps</span></div><dl class="comparison-metrics"><div><dt>Validated plan ready</dt><dd id="hc-latency-${mode.id}">—</dd></div><div><dt>Moves executed</dt><dd id="hc-moves-${mode.id}">0 / —</dd></div><div><dt>Total to solve</dt><dd id="hc-total-${mode.id}">—</dd></div></dl><p class="provider-message" id="hc-message-${mode.id}" aria-live="polite">Waiting for a model-generated plan.</p><details class="hc-plan"><summary id="hc-plan-label-${mode.id}">Model move plan</summary><ol id="hc-plan-${mode.id}"></ol></details></section>`).join('')}</div>
 <p class="comparison-method">Models generate the entire move sequence. Every move and the final goal are checked before execution; invalid plans are rejected, never replaced with the local solver. The same physical arm speed is used on both sides. A single run is not a benchmark. Returned service tiers are displayed; an unverified Ultrafast request cannot claim a speed win.</p></main>`;
-const scenes={},runs={};let ready=false,epoch=0,count=3,controllers=[];
+const scenes={},runs={};let configured=null,ready=false,epoch=0,count=3,controllers=[];
 function isBusy(){return Object.values(runs).some(run=>run.pending||run.executing);}
 function controls(){const busy=isBusy();$('hanoi-compare-run').disabled=!ready||busy;$('hanoi-compare-count').disabled=!ready||busy;$('hanoi-compare-reset').disabled=!ready;}
 function clear(){
  epoch++;controllers.forEach(c=>c.abort());controllers=[];count=Number($('hanoi-compare-count').value);
- for(const mode of modes){delete runs[mode.id];scenes[mode.id]?.reset(count);$(`hc-status-${mode.id}`).textContent='Ready to solve';$(`hc-latency-${mode.id}`).textContent='—';$(`hc-moves-${mode.id}`).textContent='0 / —';$(`hc-total-${mode.id}`).textContent='—';$(`hc-message-${mode.id}`).textContent='Waiting for a model-generated plan.';$(`hc-plan-${mode.id}`).replaceChildren();$(`hc-plan-label-${mode.id}`).textContent='Model move plan';$(`hc-tier-${mode.id}`).textContent=`Requested tier: ${mode.tier} · not yet verified`;}
+ for(const mode of modes){$(`hc-badge-${mode.id}`).textContent=configured===null?'Checking':configured?'Key configured':'Not configured';delete runs[mode.id];scenes[mode.id]?.reset(count);$(`hc-status-${mode.id}`).textContent='Ready to solve';$(`hc-latency-${mode.id}`).textContent='—';$(`hc-moves-${mode.id}`).textContent='0 / —';$(`hc-total-${mode.id}`).textContent='—';$(`hc-message-${mode.id}`).textContent='Waiting for a model-generated plan.';$(`hc-plan-${mode.id}`).replaceChildren();$(`hc-plan-label-${mode.id}`).textContent='Model move plan';$(`hc-tier-${mode.id}`).textContent=`Requested tier: ${mode.tier} · not yet verified`;}
  controls();
 }
 function summary(){
@@ -27,7 +27,7 @@ function summary(){
  if(a?.pending||b?.pending){$('hanoi-compare-summary').textContent='Both requests sent. Each arm starts when its complete plan passes validation.';return;}
  if(a?.latency!=null&&b?.latency!=null&&a.verified&&b.verified){
   const delta=Math.abs(a.latency-b.latency),winner=a.latency<b.latency?'Standard':'Ultrafast';
-  $('hanoi-compare-summary').textContent=`${winner} produced a valid plan ${Math.round(delta)} ms earlier in this run. ${a.completed===a.planLength&&b.completed===b.planLength?'Both robots solved the puzzle.':'Robots execute their own plans at identical speed.'}`;
+  $('hanoi-compare-summary').textContent=`${delta<1?'Both validated plans arrived together in this run.':`${winner} produced a valid plan ${Math.round(delta)} ms earlier in this run.`} ${a.completed===a.planLength&&b.completed===b.planLength?'Both robots solved the puzzle.':'Robots execute their own plans at identical speed.'}`;
  }else if(a&&b){$('hanoi-compare-summary').textContent='No verified speed comparison: both modes must return valid plans with confirmed service tiers.';}
 }
 function validate(moves){
@@ -66,7 +66,7 @@ async function solve(mode,start,current){
   }
   run.total=performance.now()-start;$(`hc-total-${id}`).textContent=`${(run.total/1000).toFixed(1)} s`;
   $(`hc-status-${id}`).textContent='Puzzle solved';$(`hc-message-${id}`).textContent=`All ${count} disks settled on C. ${moves.length===minimum?'Optimal solution.':'Legal solution; more moves than the minimum.'}`;
- }catch(error){if(current!==epoch)return;run.error=true;$(`hc-status-${id}`).textContent=run.completed?'Execution stopped':'No solution executed';$(`hc-message-${id}`).textContent=error.name==='AbortError'?'The model timed out. Reset and retry.':error.message;}
+ }catch(error){if(current!==epoch)return;run.error=true;$(`hc-badge-${id}`).textContent='Request failed';$(`hc-status-${id}`).textContent=run.completed?'Execution stopped':'No solution executed';$(`hc-message-${id}`).textContent=error.name==='AbortError'?'The model timed out. Reset and retry.':error.message;}
  finally{clearTimeout(timer);if(current===epoch){run.pending=false;run.executing=false;controls();summary();}}
 }
 $('hanoi-compare-form').addEventListener('submit',event=>{event.preventDefault();if(!ready||isBusy())return;clear();const current=epoch,start=performance.now();for(const mode of modes)void solve(mode,start,current);controls();summary();});
@@ -75,7 +75,7 @@ $('hanoi-compare-count').addEventListener('change',()=>{clear();$('hanoi-compare
 try{
  for(const mode of modes)scenes[mode.id]=await createHanoiScene($(`hc-scene-${mode.id}`),state=>{$(`hc-fps-${mode.id}`).textContent=`${state.fps} fps`;});
  ready=true;clear();$('hanoi-compare-summary').textContent='Ready. Each model must solve the puzzle itself; no local-solver fallback.';
- try{const response=await fetch('/api/health',{signal:AbortSignal.timeout(4000)}),health=await response.json();for(const mode of modes)$(`hc-badge-${mode.id}`).textContent=health.providers?.openai?.configured?'Key configured':'Not configured';}catch{for(const mode of modes)$(`hc-badge-${mode.id}`).textContent='Service offline';}
+ try{const response=await fetch('/api/health',{signal:AbortSignal.timeout(4000)}),health=await response.json();configured=health.providers?.openai?.configured===true;for(const mode of modes)$(`hc-badge-${mode.id}`).textContent=health.providers?.openai?.configured?'Key configured':'Not configured';}catch{for(const mode of modes)$(`hc-badge-${mode.id}`).textContent='Service offline';}
 }catch(error){$('hanoi-compare-summary').textContent=`The scenes could not start: ${error.message}`;}
 window.__hanoiComparison={getState:()=>({count,runs:structuredClone(runs),scenes:Object.fromEntries(Object.entries(scenes).map(([id,scene])=>[id,scene.getState()]))})};
 window.addEventListener('pagehide',()=>{epoch++;controllers.forEach(c=>c.abort());Object.values(scenes).forEach(s=>s.dispose());});
